@@ -54,9 +54,9 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
   private readonly successMessageTextSignal = signal('');
 
   // Configuration signals
-  private readonly configuracionSignal = signal<ConfiguracionSistema>({
-    modoSinCamara: false
-  });
+  private readonly configuracionSignal = signal<ConfiguracionSistema>(
+    this.cargarConfiguracionDesdeStorage()
+  );
   private readonly mostrarConfigSignal = signal(false);
   private readonly codigoConfigSignal = signal('');
 
@@ -118,10 +118,15 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
     this.actualizarFechaHora();
     this.intervalId = window.setInterval(() => this.actualizarFechaHora(), 1000);
 
-    // Verificación de permisos con manejo de errores mejorado
-    await this.verificarPermisosCamara().catch(() => {
-      console.warn('No se pudieron verificar permisos de cámara');
-    });
+    // Solo verificar permisos si no está en modo sin cámara
+    if (!this.configuracionSignal().modoSinCamara) {
+      await this.verificarPermisosCamara().catch(() => {
+        console.warn('No se pudieron verificar permisos de cámara');
+      });
+    } else {
+      // Si está en modo sin cámara, marcar como que no necesita permisos
+      this.cameraPermissionGrantedSignal.set(true);
+    }
   }
 
   ngAfterViewInit(): void {
@@ -496,7 +501,29 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
     this.enfocarInputSiEsNecesario();
   }
 
-  // ========== MÉTODOS DE CONFIGURACIÓN ==========
+  // ========== MÉTODOS DE CONFIGURACIÓN CON PERSISTENCIA ==========
+  private cargarConfiguracionDesdeStorage(): ConfiguracionSistema {
+    try {
+      const configGuardada = localStorage.getItem('checador-config');
+      if (configGuardada) {
+        return JSON.parse(configGuardada);
+      }
+    } catch (error) {
+      console.warn('Error al cargar configuración desde localStorage:', error);
+    }
+
+    // Configuración por defecto
+    return { modoSinCamara: false };
+  }
+
+  private guardarConfiguracionEnStorage(config: ConfiguracionSistema): void {
+    try {
+      localStorage.setItem('checador-config', JSON.stringify(config));
+    } catch (error) {
+      console.warn('Error al guardar configuración en localStorage:', error);
+    }
+  }
+
   toggleConfiguracion(): void {
     this.mostrarConfigSignal.set(!this.mostrarConfigSignal());
     this.codigoConfigSignal.set('');
@@ -520,14 +547,18 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
     const codigo = this.codigoConfigSignal();
     if (codigo === App.CODIGO_ADMIN) {
       const configActual = this.configuracionSignal();
-      this.configuracionSignal.set({
+      const nuevaConfig = {
         ...configActual,
         modoSinCamara: !configActual.modoSinCamara
-      });
+      };
+
+      this.configuracionSignal.set(nuevaConfig);
+      this.guardarConfiguracionEnStorage(nuevaConfig); // Guardar en localStorage
+
       this.mostrarConfigSignal.set(false);
       this.codigoConfigSignal.set('');
 
-      const mensaje = this.configuracionSignal().modoSinCamara
+      const mensaje = nuevaConfig.modoSinCamara
         ? 'Modo sin cámara activado'
         : 'Modo con cámara activado';
       this.mostrarMensajeExito(mensaje);
