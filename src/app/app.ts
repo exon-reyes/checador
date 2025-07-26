@@ -13,13 +13,17 @@ interface ApiErrorResponse {
   message?: string;
 }
 
+interface ConfiguracionSistema {
+  modoSinCamara: boolean;
+}
+
 @Component({
   selector: 'app-root',
   standalone: true,
   imports: [CommonModule, WebcamModule],
   templateUrl: './app.html',
   styleUrl: './app.scss',
-  changeDetection: ChangeDetectionStrategy.OnPush // Optimización: OnPush strategy
+  changeDetection: ChangeDetectionStrategy.OnPush
 })
 export class App implements OnInit, AfterViewInit, OnDestroy {
 
@@ -49,6 +53,13 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
   private readonly showSuccessMessageSignal = signal(false);
   private readonly successMessageTextSignal = signal('');
 
+  // Configuration signals
+  private readonly configuracionSignal = signal<ConfiguracionSistema>({
+    modoSinCamara: false
+  });
+  private readonly mostrarConfigSignal = signal(false);
+  private readonly codigoConfigSignal = signal('');
+
   // ========== COMPUTED PROPERTIES ==========
   readonly vistaActual = this.vistaActualSignal.asReadonly();
   readonly empleado = this.empleadoSignal.asReadonly();
@@ -66,6 +77,9 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
   readonly valorIngresado = this.valorIngresadoSignal.asReadonly();
   readonly showSuccessMessage = this.showSuccessMessageSignal.asReadonly();
   readonly successMessageText = this.successMessageTextSignal.asReadonly();
+  readonly configuracion = this.configuracionSignal.asReadonly();
+  readonly mostrarConfig = this.mostrarConfigSignal.asReadonly();
+  readonly codigoConfig = this.codigoConfigSignal.asReadonly();
 
   // Computed para máscara (evita recálculos innecesarios)
   readonly mascara = computed(() => '*'.repeat(this.valorIngresado().length));
@@ -84,6 +98,7 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
   private static readonly MAX_LENGTH = 8;
   private static readonly TIMEOUT_MS = 10000; // 10s timeout
   private static readonly RETRY_COUNT = 2;
+  private static readonly CODIGO_ADMIN = '1234'; // Código para activar modo sin cámara
   private static readonly FECHA_OPTIONS: Intl.DateTimeFormatOptions = Object.freeze({
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
   });
@@ -226,12 +241,20 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
 
   // ========== CAPTURA DE FOTO OPTIMIZADA ==========
   iniciarCapturaFoto(accion: Accion, tipoPausa?: TipoPausa): void {
+    // Si está en modo sin cámara, procesar directamente
+    if (this.configuracionSignal().modoSinCamara) {
+      this.accionActualSignal.set(accion);
+      this.pausaActualSignal.set(tipoPausa || null);
+      this.procesarSinCamara();
+      return;
+    }
+
+    // Código original para modo con cámara
     if (!this.cameraPermissionGrantedSignal()) {
       this.errorApiSignal.set('Se requieren permisos de cámara para continuar.');
       return;
     }
 
-    // Batch updates para mejor rendimiento
     this.accionActualSignal.set(accion);
     this.pausaActualSignal.set(tipoPausa || null);
     this.vistaActualSignal.set('webcam');
@@ -471,5 +494,115 @@ export class App implements OnInit, AfterViewInit, OnDestroy {
     this.resetearEstado();
     this.limpiarTimers();
     this.enfocarInputSiEsNecesario();
+  }
+
+  // ========== MÉTODOS DE CONFIGURACIÓN ==========
+  toggleConfiguracion(): void {
+    this.mostrarConfigSignal.set(!this.mostrarConfigSignal());
+    this.codigoConfigSignal.set('');
+  }
+
+  agregarDigitoConfig(digito: number): void {
+    const valorActual = this.codigoConfigSignal();
+    if (valorActual.length < 4) {
+      this.codigoConfigSignal.set(valorActual + digito.toString());
+    }
+  }
+
+  borrarConfig(): void {
+    const valorActual = this.codigoConfigSignal();
+    if (valorActual.length > 0) {
+      this.codigoConfigSignal.set(valorActual.slice(0, -1));
+    }
+  }
+
+  aplicarConfiguracion(): void {
+    const codigo = this.codigoConfigSignal();
+    if (codigo === App.CODIGO_ADMIN) {
+      const configActual = this.configuracionSignal();
+      this.configuracionSignal.set({
+        ...configActual,
+        modoSinCamara: !configActual.modoSinCamara
+      });
+      this.mostrarConfigSignal.set(false);
+      this.codigoConfigSignal.set('');
+
+      const mensaje = this.configuracionSignal().modoSinCamara
+        ? 'Modo sin cámara activado'
+        : 'Modo con cámara activado';
+      this.mostrarMensajeExito(mensaje);
+    } else {
+      this.errorApiSignal.set('Código incorrecto');
+      setTimeout(() => this.errorApiSignal.set(null), 2000);
+    }
+  }
+
+  // ========== PROCESAMIENTO SIN CÁMARA ==========
+  private procesarSinCamara(): void {
+    const empleado = this.empleadoSignal();
+    const accion = this.accionActualSignal();
+
+    if (!empleado || !accion) {
+      this.errorApiSignal.set("Error: Faltan datos para procesar la solicitud.");
+      return;
+    }
+
+    this.isUploadingSignal.set(true);
+    this.errorApiSignal.set(null);
+
+    const { apiCall, successMessage } = this.obtenerConfiguracionAccionSinCamara();
+    if (!apiCall) return;
+
+    apiCall.pipe(
+      timeout(App.TIMEOUT_MS),
+      retry(App.RETRY_COUNT),
+      takeUntil(this.destroy$),
+      finalize(() => this.isUploadingSignal.set(false)),
+      catchError((error: HttpErrorResponse) => {
+        console.error('Error en procesamiento:', error);
+        this.errorApiSignal.set(this.obtenerMensajeErrorProcesamiento(error));
+        return of(null);
+      })
+    ).subscribe(response => {
+      if (response?.success) {
+        this.mostrarMensajeExito(successMessage);
+      }
+    });
+  }
+
+  // Configuración de acciones sin cámara
+  private obtenerConfiguracionAccionSinCamara(): { apiCall: Observable<any> | null, successMessage: string } {
+    const empleado = this.empleadoSignal()!;
+    const accion = this.accionActualSignal()!;
+    const pausa = this.pausaActualSignal();
+    const fotoPlaceholder = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='; // 1x1 pixel transparente
+
+    switch (accion) {
+      case 'iniciarJornada':
+        return {
+          apiCall: this.checadorService.iniciarJornada(empleado.id, fotoPlaceholder),
+          successMessage: '¡Jornada iniciada con éxito!'
+        };
+      case 'finalizarJornada':
+        return {
+          apiCall: this.checadorService.finalizarJornada(empleado.id, fotoPlaceholder),
+          successMessage: '¡Jornada finalizada con éxito!'
+        };
+      case 'iniciarPausa':
+        if (!pausa) return { apiCall: null, successMessage: '' };
+        return {
+          apiCall: this.checadorService.iniciarPausa(empleado.id, pausa, fotoPlaceholder),
+          successMessage: `¡Pausa de ${pausa} iniciada!`
+        };
+      case 'finalizarPausa':
+        if (!pausa) return { apiCall: null, successMessage: '' };
+        return {
+          apiCall: this.checadorService.finalizarPausa(empleado.id, pausa, fotoPlaceholder),
+          successMessage: `¡Pausa de ${pausa} finalizada!`
+        };
+      default:
+        this.errorApiSignal.set("Acción no reconocida.");
+        return { apiCall: null, successMessage: '' };
+    }
   }
 }
